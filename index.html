@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f1117">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect width='180' height='180' rx='36' fill='%230f1117'/><text x='90' y='114' text-anchor='middle' font-size='90' fill='%236c9cff'>勤</text></svg>">
+<title>出勤記録</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{background:#0f1117;color:#e4e5ea;font-family:'DM Sans',sans-serif;min-height:100vh;min-height:100dvh;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom);overflow-x:hidden}
+.app{max-width:480px;margin:0 auto;padding:20px 0}
+button{font-family:inherit;cursor:pointer;-webkit-appearance:none}
+.mono{font-family:'DM Mono',monospace}
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+<script>
+// ── CONFIG ──
+const DAYS_JP=["日","月","火","水","木","金","土"];
+const MONTHS_JP=["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+const SETTINGS_KEY="attendance-settings";
+const STORAGE_KEY="attendance-records-v2";
+
+// ── SETTINGS (mutable, saved to localStorage) ──
+const defaultSettings={fixedDays:[1,3,5],hourlyRate:2600,defaultHours:8,holidayMode:"off",showHolidayName:true};
+let settings={...defaultSettings};
+function loadSettings(){try{const d=localStorage.getItem(SETTINGS_KEY);if(d){const s=JSON.parse(d);settings={...defaultSettings,...s}}}catch(e){}}
+function saveSettings(){try{localStorage.setItem(SETTINGS_KEY,JSON.stringify(settings))}catch(e){}}
+
+// ── STATE ──
+let records={};
+let currentYear=new Date().getFullYear();
+let currentMonth=new Date().getMonth();
+let tab="calendar"; // "calendar" | "history" | "settings"
+let showSalary=true;
+let payOffset=0;
+let editingDay=null;
+
+function loadRecords(){try{const d=localStorage.getItem(STORAGE_KEY);if(d)records=JSON.parse(d)}catch(e){}}
+function saveRecords(){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(records))}catch(e){}}
+
+// ── RECORDS ──
+function normalizeRecord(v){if(!v)return null;if(typeof v==="string")return{type:v,hours:v==="work"?settings.defaultHours:0};return v}
+function recType(v){const r=normalizeRecord(v);return r?r.type:null}
+function recHours(v){const r=normalizeRecord(v);return r?r.hours:0}
+
+// ── HOLIDAYS ──
+function dateKey(y,m,d){return y+"-"+String(m+1).padStart(2,"0")+"-"+String(d).padStart(2,"0")}
+const _hc={};
+function getHolidays(year){
+  if(_hc[year])return _hc[year];
+  const h={};const a=(m,d,n)=>{h[dateKey(year,m-1,d)]=n};
+  a(1,1,"元日");a(2,11,"建国記念の日");a(2,23,"天皇誕生日");a(4,29,"昭和の日");
+  a(5,3,"憲法記念日");a(5,4,"みどりの日");a(5,5,"こどもの日");a(8,11,"山の日");
+  a(11,3,"文化の日");a(11,23,"勤労感謝の日");
+  const nm=(mo,n)=>{let d=1;while(new Date(year,mo-1,d).getDay()!==1)d++;return d+(n-1)*7};
+  a(1,nm(1,2),"成人の日");a(7,nm(7,3),"海の日");a(10,nm(10,2),"スポーツの日");a(9,nm(9,3),"敬老の日");
+  a(3,Math.floor(20.8431+0.242194*(year-1980)-Math.floor((year-1980)/4)),"春分の日");
+  a(9,Math.floor(23.2488+0.242194*(year-1980)-Math.floor((year-1980)/4)),"秋分の日");
+  Object.keys(h).sort().forEach(k=>{const p=k.split("-").map(Number);const d=new Date(p[0],p[1]-1,p[2]);
+    if(d.getDay()===0){let nx=new Date(d);nx.setDate(nx.getDate()+1);let nk=dateKey(nx.getFullYear(),nx.getMonth(),nx.getDate());
+    while(h[nk]){nx.setDate(nx.getDate()+1);nk=dateKey(nx.getFullYear(),nx.getMonth(),nx.getDate())}h[nk]="振替休日"}});
+  const ak=Object.keys(h).sort();
+  for(let i=0;i<ak.length-1;i++){const p=ak[i].split("-").map(Number);const d1=new Date(p[0],p[1]-1,p[2]);
+    const bd=new Date(d1);bd.setDate(bd.getDate()+1);const d2=new Date(d1);d2.setDate(d2.getDate()+2);
+    const bk=dateKey(bd.getFullYear(),bd.getMonth(),bd.getDate());const dk=dateKey(d2.getFullYear(),d2.getMonth(),d2.getDate());
+    if(h[dk]&&!h[bk]&&bd.getDay()!==0)h[bk]="国民の休日"}
+  _hc[year]=h;return h;
+}
+function getHoliday(y,m,d){return getHolidays(y)[dateKey(y,m,d)]||null}
+
+// ── UTILS ──
+function isFixed(y,m,d){const dow=new Date(y,m,d).getDay();if(dow===0||dow===6)return false;if(settings.holidayMode==="off"&&getHoliday(y,m,d))return false;return settings.fixedDays.includes(dow)}
+function isToday(y,m,d){const t=new Date();return t.getFullYear()===y&&t.getMonth()===m&&t.getDate()===d}
+function isPast(y,m,d){const t=new Date();t.setHours(0,0,0,0);return new Date(y,m,d)<t}
+function fmtYen(n){return"\u00a5"+n.toLocaleString()}
+function getMonthDays(y,m){const days=[];const s=new Date(y,m,1).getDay();const l=new Date(y,m+1,0).getDate();for(let i=0;i<s;i++)days.push(null);for(let d=1;d<=l;d++)days.push(d);return days}
+
+// ── PAY PERIOD ──
+function getPayPeriod(offset){
+  const t=new Date(),y=t.getFullYear(),m=t.getMonth(),d=t.getDate();
+  const base=d<=15?m:m+1,tg=base+offset;
+  const start=new Date(y,tg-1,16),end=new Date(y,tg,15);
+  const f=dt=>dt.getFullYear()+"/"+(dt.getMonth()+1)+"/"+dt.getDate();
+  return{start,end,label:f(start)+" 〜 "+f(end),offset};
+}
+function countPeriod(recs,offset){
+  const p=getPayPeriod(offset);const t=new Date();t.setHours(0,0,0,0);
+  let cH=0,pH=0,abs=0,tD=0,tH=0,sD=0;
+  const c=new Date(p.start);
+  while(c<=p.end){const k=dateKey(c.getFullYear(),c.getMonth(),c.getDate());
+    const tp=recType(recs[k]),hr=recHours(recs[k]);
+    if(isFixed(c.getFullYear(),c.getMonth(),c.getDate()))sD++;
+    if(tp==="work"){tD++;tH+=hr;if(c<t)cH+=hr;else pH+=hr}
+    else if(tp==="absent")abs++;
+    c.setDate(c.getDate()+1)}
+  return{cH,pH,abs,tD,tH,sD,period:p};
+}
+
+// ── ACTIONS ──
+function setRec(key,val){if(val)records[key]=val;else delete records[key];saveRecords();render()}
+function toggleDay(day){
+  const k=dateKey(currentYear,currentMonth,day),t=recType(records[k]);
+  if(!t)setRec(k,{type:"work",hours:settings.defaultHours});
+  else if(t==="work")setRec(k,{type:"absent",hours:0});
+  else setRec(k,null);
+}
+function fillPast(){
+  const l=new Date(currentYear,currentMonth+1,0).getDate();
+  for(let d=1;d<=l;d++){const k=dateKey(currentYear,currentMonth,d);if(isFixed(currentYear,currentMonth,d)&&isPast(currentYear,currentMonth,d)&&!records[k])records[k]={type:"work",hours:settings.defaultHours}}
+  saveRecords();render();
+}
+function fillAll(){
+  const l=new Date(currentYear,currentMonth+1,0).getDate();
+  for(let d=1;d<=l;d++){const k=dateKey(currentYear,currentMonth,d);if(isFixed(currentYear,currentMonth,d)&&!records[k])records[k]={type:"work",hours:settings.defaultHours}}
+  saveRecords();render();
+}
+function clearMo(){
+  const l=new Date(currentYear,currentMonth+1,0).getDate();
+  for(let d=1;d<=l;d++)delete records[dateKey(currentYear,currentMonth,d)];
+  saveRecords();render();
+}
+function prevMonth(){if(currentMonth===0){currentYear--;currentMonth=11}else currentMonth--;render()}
+function nextMonth(){if(currentMonth===11){currentYear++;currentMonth=0}else currentMonth++;render()}
+function goToday(){currentYear=new Date().getFullYear();currentMonth=new Date().getMonth();render()}
+
+// ── RENDER ──
+function e(tag,attrs,children){
+  const el=document.createElement(tag);
+  if(attrs)Object.entries(attrs).forEach(([k,v])=>{
+    if(k==="style"&&typeof v==="object")Object.assign(el.style,v);
+    else if(k.startsWith("on"))el[k.toLowerCase()]=v;
+    else el.setAttribute(k,v)});
+  if(children!==undefined){
+    if(Array.isArray(children))children.forEach(c=>{if(c)el.appendChild(typeof c==="string"?document.createTextNode(c):c)});
+    else if(typeof children==="string")el.textContent=children;
+    else if(children instanceof Node)el.appendChild(children)}
+  return el;
+}
+
+function render(){
+  const app=document.getElementById("app");app.innerHTML="";
+
+  // Header
+  app.appendChild(e("div",{style:{marginBottom:"16px"}},[
+    e("h1",{style:{fontSize:"22px",fontWeight:700,letterSpacing:"-0.02em",color:"#f0f1f5"}},"出勤記録"),
+    e("p",{style:{marginTop:"4px",fontSize:"12px",color:"#5a5e72"}},"タップ: 出勤→欠勤→取消 ／ 長押し: 時間編集")
+  ]));
+
+  // Tabs
+  const tabBar=e("div",{style:{display:"flex",marginBottom:"16px",background:"#181b25",borderRadius:"10px",padding:"3px",border:"1px solid #252836"}});
+  [["calendar","カレンダー"],["history","期間一覧"],["settings","設定"]].forEach(([k,l])=>{
+    const b=e("button",{style:{flex:1,padding:"8px 0",border:"none",borderRadius:"8px",fontSize:"12px",fontWeight:600,
+      background:tab===k?"#252d40":"transparent",color:tab===k?"#6c9cff":"#5a5e72",transition:"all 0.15s"},onClick:()=>{tab=k;render()}},l);
+    tabBar.appendChild(b)});
+  app.appendChild(tabBar);
+
+  if(tab==="calendar")renderCalendar(app);
+  else if(tab==="history")renderHistory(app);
+  else renderSettings(app);
+
+  if(editingDay)renderModal(app);
+}
+
+function renderCalendar(app){
+  const pi=countPeriod(records,payOffset);
+  const cPay=pi.cH*settings.hourlyRate,pPay=pi.pH*settings.hourlyRate,tPay=pi.tH*settings.hourlyRate;
+  const pLabel=payOffset===0?"今回の振込見込":payOffset===1?"次回の振込見込":payOffset===-1?"前回の振込":"振込見込（"+(payOffset>0?"+":"")+payOffset+"期）";
+
+  // Salary card
+  const card=e("div",{style:{background:"linear-gradient(135deg,#1a2740,#162030)",borderRadius:"14px",padding:"16px",marginBottom:"16px",border:"1px solid #253550",userSelect:"none"}});
+  const hdr=e("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:showSalary?"10px":"0",cursor:"pointer"},
+    onClick:()=>{showSalary=!showSalary;render()}},[
+    e("div",{style:{fontSize:"12px",color:"#6c9cff",fontWeight:500}},pLabel+"（15日締）"),
+    e("div",{style:{fontSize:"10px",color:"#4a5570"}},showSalary?"▲":"▼")]);
+  card.appendChild(hdr);
+
+  if(showSalary){
+    const nav=e("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"10px"}},[
+      e("button",{style:{background:"none",border:"1px solid #253550",color:"#5a6a80",fontSize:"13px",borderRadius:"6px",width:"28px",height:"28px",display:"flex",alignItems:"center",justifyContent:"center"},onClick:()=>{payOffset--;render()}},"◂"),
+      e("div",{style:{fontSize:"11px",color:"#4a5570"}},pi.period.label),
+      e("button",{style:{background:"none",border:"1px solid #253550",color:"#5a6a80",fontSize:"13px",borderRadius:"6px",width:"28px",height:"28px",display:"flex",alignItems:"center",justifyContent:"center"},onClick:()=>{payOffset++;render()}},"▸")]);
+    card.appendChild(nav);
+    card.appendChild(e("div",{class:"mono",style:{fontSize:"30px",fontWeight:700,color:"#e8ecf4",lineHeight:1,marginBottom:"4px"}},fmtYen(tPay)));
+    card.appendChild(e("div",{style:{fontSize:"10px",color:"#4a5570",marginBottom:"10px"}},pi.tH+"h × @"+settings.hourlyRate.toLocaleString()+"円"));
+
+    const row=e("div",{style:{display:"flex",gap:"8px"}});
+    [[`確定`,fmtYen(cPay),pi.cH+"h","#7be0ad","#4a6a5a"],[`予定`,fmtYen(pPay),pi.pH+"h","#f0c060","#6a6040"],[`欠勤`,pi.abs+"日","","#ff6b7a","#6a4040"]].forEach(([lb,v1,v2,c1,c2],i)=>{
+      if(i>0)row.appendChild(e("div",{style:{width:"1px",background:"#253550"}}));
+      const col=e("div",{style:{flex:1}});
+      col.appendChild(e("div",{style:{fontSize:"10px",color:"#5a6a80",marginBottom:"3px"}},lb));
+      const vr=e("div",{style:{display:"flex",alignItems:"baseline",gap:"4px"}});
+      vr.appendChild(e("span",{class:"mono",style:{fontSize:"15px",color:c1,fontWeight:500}},v1));
+      if(v2)vr.appendChild(e("span",{style:{fontSize:"9px",color:c2}},v2));
+      col.appendChild(vr);row.appendChild(col)});
+    card.appendChild(row);
+
+    // Bar
+    if(tPay>0){
+      const bar=e("div",{style:{marginTop:"10px",height:"6px",borderRadius:"3px",background:"#0d1520",overflow:"hidden",display:"flex"}});
+      if(cPay>0)bar.appendChild(e("div",{style:{width:(cPay/tPay*100)+"%",background:"#7be0ad",borderRadius:"3px"}}));
+      if(pPay>0)bar.appendChild(e("div",{style:{width:(pPay/tPay*100)+"%",background:"#f0c060",borderRadius:"3px"}}));
+      card.appendChild(bar)}
+    card.appendChild(e("div",{style:{display:"flex",justifyContent:"space-between",marginTop:"4px"}},[
+      e("span",{style:{fontSize:"9px",color:"#4a5570"}},"出勤"+pi.tD+"日 / 予定"+pi.sD+"日")]));
+    if(payOffset!==0){const rb=e("button",{style:{marginTop:"8px",background:"none",border:"1px solid #253550",color:"#5a6a80",borderRadius:"6px",padding:"3px 10px",fontSize:"10px",display:"block",marginLeft:"auto"},onClick:()=>{payOffset=0;render()}},"今回に戻る");card.appendChild(rb)}
+  }
+  app.appendChild(card);
+
+  // Stats
+  const ld=new Date(currentYear,currentMonth+1,0).getDate();
+  let mc=0,fc=0,ft=0,ac=0,mh=0;
+  for(let d=1;d<=ld;d++){const k=dateKey(currentYear,currentMonth,d),t=recType(records[k]);
+    if(t==="work"){mc++;mh+=recHours(records[k])}if(t==="absent")ac++;if(isFixed(currentYear,currentMonth,d)){ft++;if(t==="work")fc++}}
+  let yt=0;Object.entries(records).forEach(([k,v])=>{if(k.startsWith(currentYear+"-")&&recType(v)==="work")yt++});
+
+  const stats=e("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:"6px",marginBottom:"16px"}});
+  [{l:"今月",v:mc,s:mh+"h",c:"#6c9cff"},{l:"欠勤",v:ac,s:"",c:"#ff6b7a"},{l:"固定消化",v:fc+"/"+ft,s:"",c:"#7be0ad"},{l:currentYear+"年",v:yt,s:"日",c:"#c4a0ff"}].forEach(s=>{
+    const d=e("div",{style:{background:"#181b25",borderRadius:"10px",padding:"10px 6px",border:"1px solid #252836"}},[
+      e("div",{style:{fontSize:"9px",color:"#5a5e72",marginBottom:"4px",fontWeight:500}},s.l),
+      e("div",{class:"mono",style:{fontSize:"17px",fontWeight:500,color:s.c,lineHeight:1}},String(s.v))]);
+    if(s.s)d.appendChild(e("div",{style:{fontSize:"9px",color:"#3d4155",marginTop:"2px"}},s.s));
+    stats.appendChild(d)});
+  app.appendChild(stats);
+
+  // Month nav
+  const mn=e("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"12px"}},[
+    e("button",{style:{background:"none",border:"1px solid #252836",color:"#8b8fa3",fontSize:"16px",borderRadius:"8px",width:"36px",height:"36px",display:"flex",alignItems:"center",justifyContent:"center"},onClick:prevMonth},"◂"),
+    e("div",{style:{display:"flex",alignItems:"center",gap:"10px"}},[
+      e("span",{style:{fontSize:"17px",fontWeight:700}},currentYear+"年 "+MONTHS_JP[currentMonth]),
+      e("button",{style:{fontSize:"11px",background:"#252836",border:"none",color:"#8b8fa3",borderRadius:"6px",padding:"3px 8px"},onClick:goToday},"今日")]),
+    e("button",{style:{background:"none",border:"1px solid #252836",color:"#8b8fa3",fontSize:"16px",borderRadius:"8px",width:"36px",height:"36px",display:"flex",alignItems:"center",justifyContent:"center"},onClick:nextMonth},"▸")]);
+  app.appendChild(mn);
+
+  // Day headers
+  const dh=e("div",{style:{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"2px",marginBottom:"4px"}});
+  DAYS_JP.forEach((d,i)=>dh.appendChild(e("div",{style:{textAlign:"center",fontSize:"11px",fontWeight:500,padding:"6px 0",color:i===0?"#ff6b7a":i===6?"#6c9cff":"#5a5e72"}},d)));
+  app.appendChild(dh);
+
+  // Calendar grid
+  const grid=e("div",{style:{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"2px",marginBottom:"16px"}});
+  getMonthDays(currentYear,currentMonth).forEach((day,idx)=>{
+    if(!day){grid.appendChild(e("div"));return}
+    const k=dateKey(currentYear,currentMonth,day),val=records[k],tp=recType(val),hr=recHours(val);
+    const isW=tp==="work",isA=tp==="absent",fx=isFixed(currentYear,currentMonth,day),td=isToday(currentYear,currentMonth,day);
+    const dow=new Date(currentYear,currentMonth,day).getDay(),past=isPast(currentYear,currentMonth,day),isFut=isW&&!past;
+    const hol=getHoliday(currentYear,currentMonth,day);
+    const holIsOff=hol&&settings.holidayMode==="off";
+    const holSun=(holIsOff)||dow===0;
+    let bg="#14161f",fg=holSun?"#ff6b7a":dow===6?"#4a7adf":"#8b8fa3";
+    if(hol&&settings.holidayMode==="work"&&!isW&&!isA)fg="#e0a0a0"; // subtle tint for working holiday
+    if(isW){bg=isFut?"#2a2a18":"#1e3a5f";fg=isFut?"#f0c060":"#6cc4ff"}
+    else if(isA){bg="#2a1418";fg="#ff6b7a"}else if(holIsOff)bg="#1a1215";
+
+    const btn=e("button",{style:{position:"relative",aspectRatio:"1",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+      border:td?"2px solid #6c9cff":"1px solid transparent",borderRadius:"10px",background:bg,color:fg,
+      fontSize:"14px",fontWeight:(isW||isA)?700:400,fontFamily:"'DM Mono',monospace",transition:"all 0.15s",
+      touchAction:"manipulation",WebkitUserSelect:"none",userSelect:"none"}},String(day));
+
+    if(isW){btn.appendChild(e("div",{style:{position:"absolute",bottom:"3px",fontSize:"7px",color:isFut?"#b89830":"#4a8ab0",opacity:hr<settings.defaultHours?1:0.5}},hr+"h"));
+      btn.appendChild(e("div",{style:{position:"absolute",top:"2px",right:"3px",fontSize:"7px",color:isFut?"#f0c060":"#7be0ad"}},isFut?"◇":"✓"))}
+    if(isA)btn.appendChild(e("div",{style:{position:"absolute",top:"2px",right:"3px",fontSize:"7px",color:"#ff6b7a"}},"✕"));
+    if(hol&&settings.showHolidayName&&!isW&&!isA)btn.appendChild(e("div",{style:{position:"absolute",top:"2px",left:"50%",transform:"translateX(-50%)",fontSize:"5px",color:"#ff6b7a",opacity:0.7,whiteSpace:"nowrap"}},hol.length>3?hol.slice(0,3):hol));
+    if(fx&&!isW&&!isA)btn.appendChild(e("div",{style:{position:"absolute",bottom:"4px",width:"4px",height:"4px",borderRadius:"50%",background:"#3d4155"}}));
+
+    let lpt=null;
+    btn.onpointerdown=()=>{lpt=setTimeout(()=>{editingDay=day;lpt=null;render()},400)};
+    btn.onpointerup=()=>{if(lpt){clearTimeout(lpt);lpt=null;toggleDay(day)}};
+    btn.onpointerleave=()=>{if(lpt){clearTimeout(lpt);lpt=null}};
+    btn.oncontextmenu=ev=>ev.preventDefault();
+    grid.appendChild(btn)});
+  app.appendChild(grid);
+
+  // Actions
+  const acts=e("div",{style:{display:"flex",gap:"6px",marginBottom:"16px",flexWrap:"wrap"}},[
+    e("button",{style:{flex:1,background:"#151b2e",border:"1px solid #253050",color:"#6c9cff",borderRadius:"10px",padding:"8px",fontSize:"11px",fontWeight:500},onClick:fillPast},"過去の固定日を記録"),
+    e("button",{style:{flex:1,background:"#1a1a10",border:"1px solid #3a3820",color:"#f0c060",borderRadius:"10px",padding:"8px",fontSize:"11px",fontWeight:500},onClick:fillAll},"固定日を全て予定"),
+    e("button",{style:{flex:"0 0 auto",background:"#1c1520",border:"1px solid #2d2238",color:"#9e7ab5",borderRadius:"10px",padding:"8px 14px",fontSize:"11px",fontWeight:500},onClick:clearMo},"月リセット")]);
+  app.appendChild(acts);
+
+  // Legend
+  const leg=e("div",{style:{display:"flex",gap:"10px",fontSize:"10px",color:"#5a5e72",borderTop:"1px solid #1e2030",paddingTop:"12px",flexWrap:"wrap"}});
+  [["#3d4155","●","固定","#5a5e72"],["#1e3a5f","✓","確定","#7be0ad"],["#2a2a18","◇","予定","#f0c060"],["#2a1418","✕","欠勤","#ff6b7a"],["#1a1215","祝","祝日","#ff6b7a"]].forEach(([bg,ic,lb,c])=>{
+    const sp=e("span",{style:{display:"flex",alignItems:"center",gap:"4px"}},[
+      e("span",{style:{width:"14px",height:"14px",borderRadius:"3px",background:bg,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:"7px",color:c}},ic)," "+lb]);
+    leg.appendChild(sp)});
+  app.appendChild(leg);
+}
+
+function renderHistory(app){
+  app.appendChild(e("div",{style:{fontSize:"14px",fontWeight:700,color:"#f0f1f5",marginBottom:"14px"}},"給与計算期間一覧"));
+  const list=e("div",{style:{display:"flex",flexDirection:"column",gap:"8px"}});
+  for(let i=-3;i<=2;i++){
+    const info=countPeriod(records,i),pay=info.tH*settings.hourlyRate,isCur=info.period.offset===0,isFut=info.period.offset>0;
+    const card=e("div",{style:{background:isCur?"linear-gradient(135deg,#1a2740,#162030)":"#181b25",borderRadius:"12px",padding:"14px",border:isCur?"1px solid #355080":"1px solid #252836"}});
+    card.appendChild(e("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"8px"}},[
+      e("div",{style:{fontSize:"11px",color:isCur?"#6c9cff":"#5a5e72",fontWeight:600}},isCur?"▸ 今回":isFut?"次回以降":"過去"),
+      e("div",{style:{fontSize:"10px",color:"#4a5570"}},info.period.label)]));
+    card.appendChild(e("div",{class:"mono",style:{fontSize:"24px",fontWeight:700,color:"#e8ecf4",lineHeight:1,marginBottom:"4px"}},fmtYen(pay)));
+    card.appendChild(e("div",{style:{fontSize:"9px",color:"#4a5570",marginBottom:"8px"}},info.tH+"h × @"+settings.hourlyRate.toLocaleString()+"円"));
+    const chips=e("div",{style:{display:"flex",gap:"6px",flexWrap:"wrap"}});
+    [["予定出勤",info.sD,"日","#5a5e72"],["確定",info.cH+"h","","#7be0ad"],["予定",info.pH+"h","","#f0c060"],["欠勤",info.abs,"日","#ff6b7a"]].forEach(([l,v,u,c])=>{
+      const ch=e("div",{style:{background:"#0f1117",borderRadius:"6px",padding:"4px 8px",display:"flex",alignItems:"baseline",gap:"4px"}},[
+        e("span",{style:{fontSize:"9px",color:"#5a5e72"}},l),
+        e("span",{class:"mono",style:{fontSize:"14px",fontWeight:600,color:c}},String(v))]);
+      if(u)ch.appendChild(e("span",{style:{fontSize:"9px",color:"#3d4155"}},u));
+      chips.appendChild(ch)});
+    card.appendChild(chips);
+    if(info.tD>0||info.abs>0){
+      const bar=e("div",{style:{marginTop:"8px",height:"4px",borderRadius:"2px",background:"#0d1520",overflow:"hidden",display:"flex"}});
+      if(info.cH>0)bar.appendChild(e("div",{style:{width:(info.cH/Math.max(info.tH,1)*100)+"%",background:"#7be0ad",borderRadius:"2px"}}));
+      if(info.pH>0)bar.appendChild(e("div",{style:{width:(info.pH/Math.max(info.tH,1)*100)+"%",background:"#f0c060",borderRadius:"2px"}}));
+      card.appendChild(bar)}
+    list.appendChild(card)}
+  app.appendChild(list);
+  app.appendChild(e("div",{style:{fontSize:"9px",color:"#3d4155",marginTop:"12px",textAlign:"center"}},"予定出勤日 = 固定曜日（月水金）から土日祝を除いた日数"));
+}
+
+function renderModal(app){
+  const k=dateKey(currentYear,currentMonth,editingDay);
+  const val=normalizeRecord(records[k]),et=val?val.type:null,eh=val?val.hours:settings.defaultHours;
+
+  const overlay=e("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100},
+    onClick:()=>{editingDay=null;render()}});
+  const modal=e("div",{style:{background:"#1a1d28",borderRadius:"16px",padding:"24px 20px",width:"90%",maxWidth:"340px",border:"1px solid #303648"},
+    onClick:ev=>ev.stopPropagation()});
+
+  modal.appendChild(e("div",{style:{fontSize:"16px",fontWeight:700,color:"#f0f1f5",marginBottom:"4px"}},(currentMonth+1)+"月"+editingDay+"日"));
+  modal.appendChild(e("div",{style:{fontSize:"11px",color:"#5a5e72",marginBottom:"16px"}},"勤務時間を設定"));
+
+  const btns=e("div",{style:{display:"flex",gap:"6px",marginBottom:"16px"}});
+  [["work","出勤","#1e3a5f","#6cc4ff"],["absent","欠勤","#2a1418","#ff6b7a"],[null,"取消","#252836","#8b8fa3"]].forEach(([tp,lb,bg,fg])=>{
+    btns.appendChild(e("button",{style:{flex:1,padding:"10px 0",border:et===tp?"2px solid "+fg:"1px solid #303648",borderRadius:"10px",background:bg,color:fg,fontSize:"13px",fontWeight:600},
+      onClick:()=>{if(tp===null){setRec(k,null);editingDay=null;render()}
+        else if(tp==="absent"){setRec(k,{type:"absent",hours:0});editingDay=null;render()}
+        else setRec(k,{type:"work",hours:eh||settings.defaultHours})}},lb))});
+  modal.appendChild(btns);
+
+  if(et==="work"){
+    modal.appendChild(e("div",{style:{fontSize:"11px",color:"#5a5e72",marginBottom:"8px"}},"勤務時間"));
+    const hg=e("div",{style:{display:"flex",gap:"6px",flexWrap:"wrap",marginBottom:"12px"}});
+    [1,2,3,4,5,6,7,8].forEach(h=>{
+      hg.appendChild(e("button",{class:"mono",style:{width:"44px",height:"40px",borderRadius:"8px",
+        border:eh===h?"2px solid #6c9cff":"1px solid #303648",background:eh===h?"#253050":"#14161f",
+        color:eh===h?"#6cc4ff":"#8b8fa3",fontSize:"14px",fontWeight:600},
+        onClick:()=>{setRec(k,{type:"work",hours:h})}},h+"h"))});
+    modal.appendChild(hg);
+    modal.appendChild(e("div",{style:{fontSize:"10px",color:"#4a5570",marginBottom:"12px"}},"この日の見込: "+fmtYen((eh||settings.defaultHours)*settings.hourlyRate)));
+  }
+
+  modal.appendChild(e("button",{style:{width:"100%",padding:"10px 0",border:"none",borderRadius:"10px",background:"#252d40",color:"#6c9cff",fontSize:"13px",fontWeight:600},
+    onClick:()=>{editingDay=null;render()}},"閉じる"));
+  overlay.appendChild(modal);
+  app.appendChild(overlay);
+}
+
+function renderSettings(app){
+  app.appendChild(e("div",{style:{fontSize:"14px",fontWeight:700,color:"#f0f1f5",marginBottom:"16px"}},"設定"));
+
+  // Fixed days
+  const sec1=e("div",{style:{background:"#181b25",borderRadius:"12px",padding:"16px",border:"1px solid #252836",marginBottom:"12px"}});
+  sec1.appendChild(e("div",{style:{fontSize:"12px",color:"#6c9cff",fontWeight:600,marginBottom:"10px"}},"固定出勤曜日"));
+  const dayGrid=e("div",{style:{display:"flex",gap:"6px",flexWrap:"wrap"}});
+  DAYS_JP.forEach((name,i)=>{
+    const active=settings.fixedDays.includes(i);
+    const isSat=i===6,isSun=i===0;
+    dayGrid.appendChild(e("button",{style:{width:"42px",height:"40px",borderRadius:"8px",
+      border:active?"2px solid #6c9cff":"1px solid #303648",
+      background:active?"#253050":"#14161f",
+      color:active?"#6cc4ff":isSun?"#ff6b7a":isSat?"#4a7adf":"#8b8fa3",
+      fontSize:"14px",fontWeight:600},
+      onClick:()=>{
+        if(active)settings.fixedDays=settings.fixedDays.filter(d=>d!==i);
+        else settings.fixedDays=[...settings.fixedDays,i].sort();
+        saveSettings();render()}},name))});
+  sec1.appendChild(dayGrid);
+  sec1.appendChild(e("div",{style:{fontSize:"9px",color:"#4a5570",marginTop:"8px"}},"※ 土日は自動的に除外されます"+(settings.holidayMode==="off"?"（祝日も除外）":"")));
+  app.appendChild(sec1);
+
+  // Hourly rate
+  const sec2=e("div",{style:{background:"#181b25",borderRadius:"12px",padding:"16px",border:"1px solid #252836",marginBottom:"12px"}});
+  sec2.appendChild(e("div",{style:{fontSize:"12px",color:"#6c9cff",fontWeight:600,marginBottom:"10px"}},"時給"));
+  const rateRow=e("div",{style:{display:"flex",alignItems:"center",gap:"8px"}});
+  const rateInput=e("input",{type:"number",value:String(settings.hourlyRate),style:{
+    width:"120px",padding:"10px 12px",borderRadius:"8px",border:"1px solid #303648",background:"#14161f",
+    color:"#e4e5ea",fontSize:"18px",fontWeight:600,fontFamily:"'DM Mono',monospace",
+    outline:"none",WebkitAppearance:"none",MozAppearance:"textfield"},
+    onInput:function(ev){const v=parseInt(ev.target.value);if(v>0){settings.hourlyRate=v;saveSettings();updateRateSummary()}}});
+  rateRow.appendChild(rateInput);
+  rateRow.appendChild(e("span",{style:{fontSize:"14px",color:"#8b8fa3"}},"円 / 時"));
+  sec2.appendChild(rateRow);
+  const rateSummary=e("div",{id:"rate-summary",style:{fontSize:"10px",color:"#4a5570",marginTop:"8px"}});
+  function updateRateSummary(){rateSummary.textContent="日給目安: "+fmtYen(settings.hourlyRate*settings.defaultHours)+"（"+settings.defaultHours+"h勤務時）"}
+  updateRateSummary();
+  sec2.appendChild(rateSummary);
+  app.appendChild(sec2);
+
+  // Default hours
+  const sec3=e("div",{style:{background:"#181b25",borderRadius:"12px",padding:"16px",border:"1px solid #252836",marginBottom:"12px"}});
+  sec3.appendChild(e("div",{style:{fontSize:"12px",color:"#6c9cff",fontWeight:600,marginBottom:"10px"}},"規定勤務時間"));
+  const hourGrid=e("div",{style:{display:"flex",gap:"6px",flexWrap:"wrap"}});
+  [4,5,6,7,8].forEach(h=>{
+    hourGrid.appendChild(e("button",{class:"mono",style:{width:"52px",height:"40px",borderRadius:"8px",
+      border:settings.defaultHours===h?"2px solid #6c9cff":"1px solid #303648",
+      background:settings.defaultHours===h?"#253050":"#14161f",
+      color:settings.defaultHours===h?"#6cc4ff":"#8b8fa3",
+      fontSize:"14px",fontWeight:600},
+      onClick:()=>{settings.defaultHours=h;saveSettings();render()}},h+"h"))});
+  sec3.appendChild(hourGrid);
+  sec3.appendChild(e("div",{style:{fontSize:"9px",color:"#4a5570",marginTop:"8px"}},"新規出勤記録時のデフォルト時間です。個別に変更も可能です。"));
+  app.appendChild(sec3);
+
+  // Holiday settings
+  const sec3b=e("div",{style:{background:"#181b25",borderRadius:"12px",padding:"16px",border:"1px solid #252836",marginBottom:"12px"}});
+  sec3b.appendChild(e("div",{style:{fontSize:"12px",color:"#6c9cff",fontWeight:600,marginBottom:"10px"}},"祝日の扱い"));
+  const holModes=[
+    ["off","祝日は休み","固定出勤日から祝日を除外します","#ff6b7a"],
+    ["work","祝日も出勤","祝日でも固定曜日なら出勤日として扱います","#7be0ad"]
+  ];
+  const holGrid=e("div",{style:{display:"flex",flexDirection:"column",gap:"6px",marginBottom:"12px"}});
+  holModes.forEach(([mode,label,desc,accent])=>{
+    const active=settings.holidayMode===mode;
+    holGrid.appendChild(e("button",{style:{display:"flex",alignItems:"center",gap:"10px",padding:"10px 12px",borderRadius:"10px",
+      border:active?"2px solid "+accent:"1px solid #303648",
+      background:active?"#1a2030":"#14161f",textAlign:"left",width:"100%"},
+      onClick:()=>{settings.holidayMode=mode;saveSettings();render()}},[
+        e("div",{style:{width:"18px",height:"18px",borderRadius:"50%",border:"2px solid "+(active?accent:"#404050"),
+          display:"flex",alignItems:"center",justifyContent:"center"}},[
+            active?e("div",{style:{width:"8px",height:"8px",borderRadius:"50%",background:accent}}):null]),
+        e("div",{},[
+          e("div",{style:{fontSize:"13px",color:active?"#e4e5ea":"#8b8fa3",fontWeight:600}},label),
+          e("div",{style:{fontSize:"9px",color:"#4a5570",marginTop:"2px"}},desc)])
+    ]))});
+  sec3b.appendChild(holGrid);
+
+  // Show holiday name toggle
+  const nameToggle=e("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",cursor:"pointer"},
+    onClick:()=>{settings.showHolidayName=!settings.showHolidayName;saveSettings();render()}},[
+    e("span",{style:{fontSize:"12px",color:"#8b8fa3"}},"カレンダーに祝日名を表示"),
+    e("div",{style:{width:"40px",height:"22px",borderRadius:"11px",
+      background:settings.showHolidayName?"#6c9cff":"#303648",
+      padding:"2px",transition:"background 0.2s",display:"flex",
+      justifyContent:settings.showHolidayName?"flex-end":"flex-start"}},[
+      e("div",{style:{width:"18px",height:"18px",borderRadius:"50%",background:"#e4e5ea",transition:"all 0.2s"}})])
+  ]);
+  sec3b.appendChild(nameToggle);
+  app.appendChild(sec3b);
+
+  // Current summary
+  const sec4=e("div",{style:{background:"linear-gradient(135deg,#1a2740,#162030)",borderRadius:"12px",padding:"16px",border:"1px solid #253550",marginBottom:"12px"}});
+  sec4.appendChild(e("div",{style:{fontSize:"12px",color:"#6c9cff",fontWeight:600,marginBottom:"10px"}},"現在の設定"));
+  const holModeLabel=settings.holidayMode==="off"?"休み（除外）":"出勤扱い";
+  const lines=[
+    ["固定出勤日",settings.fixedDays.map(d=>DAYS_JP[d]).join("・")||"なし"],
+    ["時給",fmtYen(settings.hourlyRate)],
+    ["規定勤務時間",settings.defaultHours+"時間"],
+    ["日給目安",fmtYen(settings.hourlyRate*settings.defaultHours)],
+    ["祝日",holModeLabel],
+    ["祝日名表示",settings.showHolidayName?"ON":"OFF"],
+  ];
+  lines.forEach(([l,v])=>{
+    sec4.appendChild(e("div",{style:{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #1e2030"}},[
+      e("span",{style:{fontSize:"12px",color:"#8b8fa3"}},l),
+      e("span",{class:"mono",style:{fontSize:"13px",color:"#e4e5ea",fontWeight:500}},v)]))});
+  app.appendChild(sec4);
+
+  // Reset button
+  app.appendChild(e("button",{style:{width:"100%",padding:"12px",border:"1px solid #2d2238",borderRadius:"10px",
+    background:"#1c1520",color:"#9e7ab5",fontSize:"12px",fontWeight:500,marginTop:"8px"},
+    onClick:()=>{if(confirm("設定を初期値に戻しますか？")){settings={...defaultSettings};saveSettings();render()}}},
+    "設定を初期値に戻す"));
+}
+
+// ── INIT ──
+loadSettings();
+loadRecords();
+render();
+if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch(()=>{});
+</script>
+</body>
+</html>
